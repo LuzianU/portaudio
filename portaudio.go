@@ -14,6 +14,7 @@ package portaudio
 /*
 #cgo pkg-config: portaudio-2.0
 #include <portaudio.h>
+#include <pa_win_wasapi.h> // Include the WASAPI header
 extern PaStreamCallback* paStreamCallback;
 */
 import "C"
@@ -394,9 +395,26 @@ type StreamParameters struct {
 // A nil Device indicates that no device is to be used
 // -- i.e., for an input- or output-only stream.
 type StreamDeviceParameters struct {
-	Device   *DeviceInfo
-	Channels int
-	Latency  time.Duration
+	Device                    *DeviceInfo
+	Channels                  int
+	Latency                   time.Duration
+	HostApiSpecificStreamInfo unsafe.Pointer
+}
+
+func (param *StreamDeviceParameters) SetAsWasapiShared() {
+	param.HostApiSpecificStreamInfo = nil
+}
+
+func (param *StreamDeviceParameters) SetAsWasapiExclusive() {
+	var wasapi C.PaWasapiStreamInfo
+
+	wasapi.size = C.ulong(unsafe.Sizeof(wasapi))
+	wasapi.hostApiType = C.paWASAPI
+	wasapi.version = 1
+	wasapi.flags = C.paWinWasapiExclusive | C.paWinWasapiThreadPriority
+	wasapi.threadPriority = C.eThreadPriorityProAudio
+
+	param.HostApiSpecificStreamInfo = unsafe.Pointer(&wasapi)
 }
 
 // FramesPerBufferUnspecified ...
@@ -652,6 +670,22 @@ func OpenStream(p StreamParameters, args ...interface{}) (*Stream, error) {
 	if !s.callback.IsValid() {
 		cb = nil
 	}
+
+	if p.Input.Device != nil && p.Input.HostApiSpecificStreamInfo != nil {
+		s.inParams.hostApiSpecificStreamInfo = unsafe.Pointer(&p.Input.HostApiSpecificStreamInfo)
+		pinner := &runtime.Pinner{}
+		defer pinner.Unpin()
+		pinner.Pin(s.inParams.hostApiSpecificStreamInfo)
+	}
+
+	if p.Output.Device != nil && p.Output.HostApiSpecificStreamInfo != nil {
+		s.outParams.hostApiSpecificStreamInfo = p.Output.HostApiSpecificStreamInfo
+
+		pinner := &runtime.Pinner{}
+		defer pinner.Unpin()
+		pinner.Pin(s.outParams.hostApiSpecificStreamInfo)
+	}
+
 	paErr := C.Pa_OpenStream(&s.paStream, s.inParams, s.outParams, C.double(p.SampleRate), C.ulong(p.FramesPerBuffer), C.PaStreamFlags(p.Flags), cb, unsafe.Pointer(s.id))
 	if paErr != C.paNoError {
 		delStream(s)
